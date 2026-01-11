@@ -1,0 +1,21 @@
+# Logs
+*.log
+
+# Backup files
+*.backup
+*.bak
+
+# Temporary files
+*.tmp
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Credentials and sensitive data
+*credentials*
+*password*
+*secret*
+*.key
+*.pem
