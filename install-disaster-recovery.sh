@@ -27,17 +27,15 @@ fi
 # Create backup logs directory
 mkdir -p ~/backup-logs
 
-# Copy the backup script
-if [ ! -f "pi-disaster-recovery-backup.sh" ]; then
-    echo "Error: pi-disaster-recovery-backup.sh not found in current directory"
+# Verify backup script exists
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ ! -f "$SCRIPT_DIR/pi-disaster-recovery-backup.sh" ]; then
+    echo "Error: pi-disaster-recovery-backup.sh not found in $SCRIPT_DIR"
     exit 1
 fi
 
-cp pi-disaster-recovery-backup.sh ~/pi-disaster-recovery-backup.sh
-chmod +x ~/pi-disaster-recovery-backup.sh
-
 echo ""
-echo "✓ Backup script installed to ~/pi-disaster-recovery-backup.sh"
+echo "✓ Using backup script from $SCRIPT_DIR"
 echo ""
 
 # Ask about scheduling
@@ -52,15 +50,15 @@ read -p "Enter choice (1-4): " schedule
 
 case $schedule in
     1)
-        CRON_LINE="0 2 * * 0 /home/pierre/pi-disaster-recovery-backup.sh"
+        CRON_LINE="0 2 * * 0 cd $SCRIPT_DIR && git pull && $SCRIPT_DIR/pi-disaster-recovery-backup.sh"
         SCHEDULE_DESC="Weekly on Sunday at 2 AM"
         ;;
     2)
-        CRON_LINE="0 3 * * * /home/pierre/pi-disaster-recovery-backup.sh"
+        CRON_LINE="0 3 * * * cd $SCRIPT_DIR && git pull && $SCRIPT_DIR/pi-disaster-recovery-backup.sh"
         SCHEDULE_DESC="Daily at 3 AM"
         ;;
     3)
-        CRON_LINE="0 2 * * 0,3 /home/pierre/pi-disaster-recovery-backup.sh"
+        CRON_LINE="0 2 * * 0,3 cd $SCRIPT_DIR && git pull && $SCRIPT_DIR/pi-disaster-recovery-backup.sh"
         SCHEDULE_DESC="Wednesday and Sunday at 2 AM"
         ;;
     4)
@@ -90,7 +88,7 @@ echo "=========================================="
 echo "Installation Complete!"
 echo "=========================================="
 echo ""
-echo "Backup script: ~/pi-disaster-recovery-backup.sh"
+echo "Backup script: $SCRIPT_DIR/pi-disaster-recovery-backup.sh"
 echo "Schedule: $SCHEDULE_DESC"
 echo "Logs: ~/backup-logs/disaster-recovery-backup.log"
 echo ""
@@ -99,7 +97,7 @@ read -p "Run first backup now? (y/n): " run_now
 if [ "$run_now" = "y" ]; then
     echo ""
     echo "Running first backup..."
-    ~/pi-disaster-recovery-backup.sh
+    "$SCRIPT_DIR/pi-disaster-recovery-backup.sh"
     echo ""
     echo "First backup complete!"
     echo ""
@@ -107,7 +105,7 @@ if [ "$run_now" = "y" ]; then
 else
     echo ""
     echo "To run backup manually:"
-    echo "  ~/pi-disaster-recovery-backup.sh"
+    echo "  $SCRIPT_DIR/pi-disaster-recovery-backup.sh"
 fi
 
 echo ""
