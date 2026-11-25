@@ -9,6 +9,15 @@ ONEDRIVE_BACKUP_ROOT="OneDrive:Documents/Pi-Backup"
 LOG_FILE="/home/pierre/backup-logs/disaster-recovery-backup.log"
 RCLONE_CONFIG="/home/pierre/.config/rclone/rclone.conf"
 
+# rclone skriver tillbaka förnyade OneDrive-tokens i rclone.conf. När det sker under `sudo rclone`
+# blir filen root-ägd (600) och alla steg som körs som pierre misslyckas ("permission denied").
+# Hände 8/15/22 nov 2026. Återställ ägarskapet före och efter varje sudo-steg.
+fix_rclone_conf() {
+    sudo chown pierre:pierre "$RCLONE_CONFIG" 2>/dev/null
+    sudo chmod 600 "$RCLONE_CONFIG" 2>/dev/null
+}
+fix_rclone_conf
+
 # Create log directory
 mkdir -p /home/pierre/backup-logs
 
@@ -29,6 +38,12 @@ log "Note: Excluding .git, node_modules, and browser cache (restored via git/npm
     --exclude ".local/share/Trash/**" \
     --exclude "*.tmp" \
     --exclude "OneDrive/**" \
+    --exclude "thread/otbr-data/**" \
+    --exclude "esp-idf/**" \
+    --exclude "esp-idf-v*/**" \
+    --exclude ".espressif/**" \
+    --exclude "thread/*/build/**" \
+    --exclude "esphome/config/.esphome/**" \
     --exclude "backup-logs/**" \
     --exclude "ha_config_backup*/**" \
     --exclude ".git/**" \
@@ -54,19 +69,46 @@ else
     log "✗ Home directory backup failed"
 fi
 
-# 2. Backup Home Assistant config (main config only)
+# 2. Backup Home Assistant config (konsistent DB-snapshot + config-filer)
 log "Backing up Home Assistant configuration..."
 
-# Backup home assistant config from pi user (this is the main one - 236MB)
+# Backup home assistant config from pi user (main install)
 if [ -d "/home/pi/homeassistant_config" ]; then
+    # 2a. Konsistent snapshot av den levande SQLite-DB:n (undviker hot-copy-korruption)
+    HA_SNAPSHOT="/tmp/ha_snapshot.db"
+    sudo rm -f "$HA_SNAPSHOT"
+    if sudo /usr/bin/sqlite3 /home/pi/homeassistant_config/home-assistant_v2.db ".backup '$HA_SNAPSHOT'"; then
+        log "✓ HA DB-snapshot skapad"
+    else
+        log "✗ HA DB-snapshot misslyckades"
+    fi
+
+    # 2b. Synka config-filer, men EXKLUDERA den heta/levande DB:n (backas via snapshot)
     sudo /usr/bin/rclone sync /home/pi/homeassistant_config "$ONEDRIVE_BACKUP_ROOT/home-assistant" \
         --config="$RCLONE_CONFIG" \
+        --exclude "home-assistant_v2.db" \
+        --exclude "home-assistant_v2.db-wal" \
+        --exclude "home-assistant_v2.db-shm" \
         --log-file="$LOG_FILE" \
         --log-level INFO
+
+    # 2c. Ladda upp den konsistenta DB-snapshoten under ordinarie DB-namn
+    if [ -f "$HA_SNAPSHOT" ]; then
+        sudo /usr/bin/rclone copyto "$HA_SNAPSHOT" "$ONEDRIVE_BACKUP_ROOT/home-assistant/home-assistant_v2.db" \
+            --config="$RCLONE_CONFIG" \
+            --log-file="$LOG_FILE" \
+            --log-level INFO
+        sudo rm -f "$HA_SNAPSHOT"
+        # Ta bort foraldrade WAL/SHM-sidofiler fran backupen (snapshoten ar sjalvstandig)
+        sudo /usr/bin/rclone deletefile "$ONEDRIVE_BACKUP_ROOT/home-assistant/home-assistant_v2.db-wal" --config="$RCLONE_CONFIG" --log-file="$LOG_FILE" 2>/dev/null || true
+        sudo /usr/bin/rclone deletefile "$ONEDRIVE_BACKUP_ROOT/home-assistant/home-assistant_v2.db-shm" --config="$RCLONE_CONFIG" --log-file="$LOG_FILE" 2>/dev/null || true
+    fi
     log "✓ Home Assistant config backed up"
 else
     log "ℹ Home Assistant config not found, skipping"
 fi
+
+fix_rclone_conf
 
 # 3. Backup Pi-hole config (Docker-based installation)
 log "Backing up Pi-hole configuration..."
@@ -99,6 +141,28 @@ if [ -d "/etc/dnsmasq.d" ] && [ "$(ls -A /etc/dnsmasq.d 2>/dev/null)" ]; then
         --log-level INFO
     log "✓ Host dnsmasq config backed up"
 fi
+
+# 4b. Thread/Matter: OTBR-nätverksnycklar (root-ägda, 600) + udev/sysctl för RCP:n
+#     Förlorade nycklar = alla Thread-enheter måste paras om. Matter-fabric (~/matter-server/data)
+#     ägs av pierre och följer med home-synken ovan.
+if [ -d "/home/pierre/thread/otbr-data" ]; then
+    if sudo /usr/bin/rclone sync /home/pierre/thread/otbr-data "$ONEDRIVE_BACKUP_ROOT/thread-otbr-data" \
+        --config="$RCLONE_CONFIG" \
+        --log-file="$LOG_FILE" \
+        --log-level INFO; then
+        log "✓ Thread/OTBR-nycklar backade"
+    else
+        log "✗ Thread/OTBR-nycklar misslyckades"
+    fi
+    # OneDrive svarar 404 på filändelsen .rules → spara alla som <namn>.txt
+    for f in /etc/udev/rules.d/99-thread-rcp.rules /etc/sysctl.d/60-otbr.conf; do
+        [ -f "$f" ] && sudo /usr/bin/rclone copyto "$f" "$ONEDRIVE_BACKUP_ROOT/thread-system/$(basename "$f").txt" \
+            --config="$RCLONE_CONFIG" --log-file="$LOG_FILE" --log-level INFO
+    done
+    log "✓ Thread udev/sysctl backade"
+fi
+
+fix_rclone_conf
 
 # 5. Save list of installed packages
 log "Saving list of installed packages..."
@@ -183,6 +247,11 @@ rclone sync OneDrive:Documents/Pi-Backup/home-pierre /home/pierre
 # Restore Home Assistant
 sudo rclone sync OneDrive:Documents/Pi-Backup/home-assistant /home/pi/homeassistant_config
 
+# Restore Thread/OTBR-nycklar (före `docker start otbr`) + udev/sysctl
+sudo rclone sync OneDrive:Documents/Pi-Backup/thread-otbr-data /home/pierre/thread/otbr-data
+sudo rclone copyto OneDrive:Documents/Pi-Backup/thread-system/99-thread-rcp.rules.txt /etc/udev/rules.d/99-thread-rcp.rules
+sudo rclone copyto OneDrive:Documents/Pi-Backup/thread-system/60-otbr.conf.txt /etc/sysctl.d/60-otbr.conf
+
 # Restore Pi-hole (Docker-based - restore after container is created)
 # First install Docker and create Pi-hole container, then:
 docker stop pihole
@@ -253,6 +322,8 @@ EOF
     --log-level INFO
 rm /tmp/RECOVERY-INSTRUCTIONS.md
 log "✓ Recovery instructions created"
+
+fix_rclone_conf
 
 # 9. Cleanup old logs
 log "Cleaning up old log files..."
